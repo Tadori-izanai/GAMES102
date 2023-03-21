@@ -4,7 +4,168 @@
 
 #include <_deps/imgui/imgui.h>
 
+#include <Eigen/Core>
+#include <Eigen/Dense>
+#include <cmath>
+#include <tuple>
+
+
 using namespace Ubpa;
+
+inline std::tuple<float, float> getMinMax(std::vector<Ubpa::pointf2>& points) {
+    float min = std::numeric_limits<float>::max();
+    float max = std::numeric_limits<float>::min();
+    for (auto& p : points) {
+        if (p[0] < min) {
+            min = p[0];
+        }
+        if (p[0] > max) {
+            max = p[0];
+        }
+    }
+    return std::make_tuple(min, max);
+}
+
+inline Eigen::RowVectorXf getPolynomialRow(float x, int size) {
+    Eigen::RowVectorXf row(size);
+    for (int k = 0; k < size; k++) {
+        row[k] = std::pow(x, k);
+    }
+    return row;
+}
+
+inline Eigen::RowVectorXf getGaussianBaseRow(Eigen::VectorXf xSamples, float x, float sigma) {
+    Eigen::ArrayXf arr = xSamples.array();
+    Eigen::ArrayXf gaussian = (-(arr - x).square() / (2 * sigma * sigma)).exp();
+    Eigen::RowVectorXf result(xSamples.size() + 1);
+    result << 1.0f, gaussian.matrix().transpose();
+    return result;
+}
+
+inline int getRenderingpointsX(std::vector<Ubpa::pointf2>& points, std::vector<float> & target) {
+    auto [xMin, xMax] = getMinMax(points);
+    int renderingSize = int((xMax - xMin) / STEP) + 1;
+    //std::vector<float> xRenderingPoints(renderingSize);
+    target.resize(renderingSize);
+
+    target[0] = xMin;
+    int ind = 1;
+    while (ind < renderingSize) {
+        target[ind] = target[ind - 1] + STEP;
+        ind += 1;
+    }
+    return renderingSize;
+}
+
+inline void connectPointsWithPolyline(
+    ImDrawList *dl, const ImVec2 &origin, const std::vector<float>& xPoints, const std::vector<float>& yPoints, ImU32 color
+) {
+    std::vector<ImVec2> canvasPoints(xPoints.size());
+    for (int i = 0; i < canvasPoints.size(); i += 1) {
+        canvasPoints[i] = ImVec2(origin.x + xPoints[i], origin.y - yPoints[i]);
+    }
+    dl->AddPolyline(canvasPoints.data(), canvasPoints.size(), color, false, 3.0f);
+}
+
+void polynomialFittingInterpolation(ImDrawList *dl, std::vector<Ubpa::pointf2>& points, const ImVec2& origin, ImU32 color = MY_RED) {
+    int n = points.size();
+    Eigen::MatrixXf X(n, n);
+    Eigen::VectorXf y(n);
+
+    int j = 0;
+    for (auto& p : points) {
+        y[j] = -p[1];
+        X.row(j) = getPolynomialRow(p[0], n);
+        j += 1;
+    }
+    
+    Eigen::VectorXf polynomialCoefficients = X.householderQr().solve(y);
+
+    std::vector<float> xRenderingPoints;
+    int renderingSize = getRenderingpointsX(points, xRenderingPoints);
+
+    std::vector<float> yRenderingPoints(renderingSize);
+    for (int i = 0; i < renderingSize; i += 1) {
+        yRenderingPoints[i] = getPolynomialRow(xRenderingPoints[i], n).dot(polynomialCoefficients);
+    }
+    
+    connectPointsWithPolyline(dl, origin, xRenderingPoints, yRenderingPoints, color);
+}
+
+void gaussianFittingInterpolation(ImDrawList *dl, std::vector<Ubpa::pointf2>& points, const ImVec2& origin, float sigma, ImU32 color = MY_YELLOW) {
+    int n = points.size();
+    Eigen::VectorXf y(n + 1);
+    Eigen::VectorXf x(n);
+    Eigen::MatrixXf X(n + 1, n + 1);
+
+    int ind = 0;
+    for (auto& p : points) {
+        y[ind] = -p[1];
+        x[ind] = p[0];
+        ind += 1;
+    }
+    y[ind] = (y[ind - 1] + y[ind - 2]) / 2;
+    for (int i = 0; i < n; i += 1) {
+        X.row(i) = getGaussianBaseRow(x, x[i], sigma);
+    }
+    X.row(n) = getGaussianBaseRow(x, (x[n - 1] + x[n - 2]) / 2, sigma);
+
+    Eigen::VectorXf gaussianCoefficients = X.householderQr().solve(y);
+
+    std::vector<float> xRenderingPoints;
+    int renderingSize = getRenderingpointsX(points, xRenderingPoints);
+
+    std::vector<float> yRenderingPoints(renderingSize);
+    for (int i = 0; i < renderingSize; i += 1) {
+        yRenderingPoints[i] = getGaussianBaseRow(x, xRenderingPoints[i], n).dot(gaussianCoefficients);
+    }
+
+    connectPointsWithPolyline(dl, origin, xRenderingPoints, yRenderingPoints, color);
+}
+
+void ridgeRegressionInterpolation(ImDrawList *dl, std::vector<Ubpa::pointf2>& points, const ImVec2&origin, int span, float lambda, ImU32 color = MY_GREEN) {
+    int n = points.size();
+    if (span > n) {
+        span = n;
+    }
+
+    Eigen::MatrixXf X(n, span);
+    Eigen::VectorXf y(n);
+    int ind = 0;
+    for (auto& p : points) {
+        y[ind] = -p[1];
+        X.row(ind) = getPolynomialRow(p[0], span);
+        ind += 1;
+    }
+
+    Eigen::MatrixXf I = Eigen::MatrixXf::Identity(span, span);
+
+    Eigen::VectorXf polynomialCoefficients = (X.transpose() * X + lambda * I).householderQr().solve(X.transpose() * y);
+
+    std::vector<float> xRenderingPoints;
+    int renderingSize = getRenderingpointsX(points, xRenderingPoints);
+
+    std::vector<float> yRenderingPoints(renderingSize);
+    for (int i = 0; i < renderingSize; i += 1) {
+        yRenderingPoints[i] = getPolynomialRow(xRenderingPoints[i], span).dot(polynomialCoefficients);
+    }
+
+    connectPointsWithPolyline(dl, origin, xRenderingPoints, yRenderingPoints, color);
+}
+
+void polynomialRegressionInterpolation(ImDrawList* dl, std::vector<Ubpa::pointf2>& points, const ImVec2& origin, int span, ImU32 color = MY_CYAN) {
+    ridgeRegressionInterpolation(dl, points, origin, span, 0.0f, color);
+}
+
+inline bool isMouseInCanvas(ImGuiIO& io, const ImVec2 &p0, const ImVec2 &p1) {
+    float xBoundMin = p0.x;
+    float xBoundMax = p1.x;
+    float yBoundMin = p0.y;
+    float yBoundMax = p1.y;
+    float x = io.MousePos.x;
+    float y = io.MousePos.y;
+    return (x > xBoundMin) && (x < xBoundMax) && (y > yBoundMin) && (y < yBoundMax);
+}
 
 void CanvasSystem::OnUpdate(Ubpa::UECS::Schedule& schedule) {
     schedule.RegisterCommand([](Ubpa::UECS::World* w) {
@@ -13,26 +174,57 @@ void CanvasSystem::OnUpdate(Ubpa::UECS::Schedule& schedule) {
             return;
 
         if (ImGui::Begin("Canvas")) {
-            ImGui::Checkbox("Enable grid", &data->opt_enable_grid);
-            ImGui::Checkbox("Enable context menu", &data->opt_enable_context_menu);
-            ImGui::Text("Mouse Left: drag to add lines,\nMouse Right: drag to scroll, click for context menu.");
+            if (ImGui::CollapsingHeader("Enable")) {
+                ImGui::Checkbox("Enable grid", &data->opt_enable_grid);
+                //ImGui::Checkbox("Enable context menu", &data->opt_enable_context_menu);
+                ImGui::Checkbox("Enable adding points", &data->opt_enable_adding_points);
+            }
 
-            // Typically you would use a BeginChild()/EndChild() pair to benefit from a clipping region + own scrolling.
-            // Here we demonstrate that this can be replaced by simple offsetting + custom drawing + PushClipRect/PopClipRect() calls.
-            // To use a child window instead we could use, e.g:
-            //      ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));      // Disable padding
-            //      ImGui::PushStyleColor(ImGuiCol_ChildBg, IM_COL32(50, 50, 50, 255));  // Set a background color
-            //      ImGui::BeginChild("canvas", ImVec2(0.0f, 0.0f), true, ImGuiWindowFlags_NoMove);
-            //      ImGui::PopStyleColor();
-            //      ImGui::PopStyleVar();
-            //      [...]
-            //      ImGui::EndChild();
+            if (ImGui::CollapsingHeader("Interpolations")) {
+                ImGui::PushStyleColor(ImGuiCol_Text, MY_RED);
+                ImGui::Checkbox("Show Polynomial Fitting    ", &data->opt_polynomial_fitting);
+                ImGui::PopStyleColor();
+
+                ImGui::SameLine();
+                ImGui::PushStyleColor(ImGuiCol_Text, MY_YELLOW);
+                ImGui::Checkbox("Show Gaussian Fitting", &data->opt_gaussian_fitting);
+                ImGui::PopStyleColor();
+
+                ImGui::PushStyleColor(ImGuiCol_Text, MY_CYAN);
+                ImGui::Checkbox("Show Polynomial Regression ", &data->opt_polynomial_regression);
+                ImGui::PopStyleColor();
+
+                ImGui::SameLine();
+                ImGui::PushStyleColor(ImGuiCol_Text, MY_GREEN);
+                ImGui::Checkbox("Show Ridge Regression", &data->opt_ridge_regression);
+                ImGui::PopStyleColor();
+            }
+
+            if (ImGui::CollapsingHeader("Parameters")) {
+                ImGui::SliderFloat("sigma", &data->sigma, 1.0f, 50.0f);
+                ImGui::SliderInt("span", &data->span, 0, 10);
+                ImGui::SliderFloat("lambda", &data->lambda, 0.0f, 1000.0f);
+            }
+
+            ImGui::Text("Mouse Left: click to add sample points");
+            
+            if (ImGui::Button("Remove One Sample Point")) {
+                if (data->samplePoints.size() > 0) {
+                    data->samplePoints.pop_back();
+                }
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("Remove All Sample Points")) {
+                if (data->samplePoints.size() > 0) {
+                    data->samplePoints.clear();
+                }
+            }
 
             // Using InvisibleButton() as a convenience 1) it will advance the layout cursor and 2) allows us to use IsItemHovered()/IsItemActive()
             ImVec2 canvas_p0 = ImGui::GetCursorScreenPos();      // ImDrawList API uses screen coordinates!
             ImVec2 canvas_sz = ImGui::GetContentRegionAvail();   // Resize canvas to what's available
-            if (canvas_sz.x < 50.0f) canvas_sz.x = 50.0f;
-            if (canvas_sz.y < 50.0f) canvas_sz.y = 50.0f;
+            if (canvas_sz.x < MIN_CANVAS_SIZE) canvas_sz.x = MIN_CANVAS_SIZE;
+            if (canvas_sz.y < MIN_CANVAS_SIZE) canvas_sz.y = MIN_CANVAS_SIZE;
             ImVec2 canvas_p1 = ImVec2(canvas_p0.x + canvas_sz.x, canvas_p0.y + canvas_sz.y);
 
             // Draw border and background color
@@ -48,19 +240,6 @@ void CanvasSystem::OnUpdate(Ubpa::UECS::Schedule& schedule) {
             const ImVec2 origin(canvas_p0.x + data->scrolling[0], canvas_p0.y + data->scrolling[1]); // Lock scrolled origin
             const pointf2 mouse_pos_in_canvas(io.MousePos.x - origin.x, io.MousePos.y - origin.y);
 
-            // Add first and second point
-            if (is_hovered && !data->adding_line && ImGui::IsMouseClicked(ImGuiMouseButton_Left))
-            {
-                data->points.push_back(mouse_pos_in_canvas);
-                data->points.push_back(mouse_pos_in_canvas);
-                data->adding_line = true;
-            }
-            if (data->adding_line)
-            {
-                data->points.back() = mouse_pos_in_canvas;
-                if (!ImGui::IsMouseDown(ImGuiMouseButton_Left))
-                    data->adding_line = false;
-            }
 
             // Pan (we use a zero mouse threshold when there's no context menu)
             // You may decide to make that threshold dynamic based on whether the mouse is hovering something etc.
@@ -71,20 +250,19 @@ void CanvasSystem::OnUpdate(Ubpa::UECS::Schedule& schedule) {
                 data->scrolling[1] += io.MouseDelta.y;
             }
 
-            // Context menu (under default mouse threshold)
-            ImVec2 drag_delta = ImGui::GetMouseDragDelta(ImGuiMouseButton_Right);
-            if (data->opt_enable_context_menu && ImGui::IsMouseReleased(ImGuiMouseButton_Right) && drag_delta.x == 0.0f && drag_delta.y == 0.0f)
-                ImGui::OpenPopupContextItem("context");
-            if (ImGui::BeginPopup("context"))
-            {
-                if (data->adding_line)
-                    data->points.resize(data->points.size() - 2);
-                data->adding_line = false;
-                if (ImGui::MenuItem("Remove one", NULL, false, data->points.size() > 0)) { data->points.resize(data->points.size() - 2); }
-                if (ImGui::MenuItem("Remove all", NULL, false, data->points.size() > 0)) { data->points.clear(); }
-                ImGui::EndPopup();
-            }
 
+            // push the sample points
+            ImVec2 drag_delta_left = ImGui::GetMouseDragDelta(ImGuiMouseButton_Left);
+            float epsilon = 0.00001f;
+            if (
+                data->opt_enable_adding_points && ImGui::IsMouseReleased(ImGuiMouseButton_Left)
+                && drag_delta_left.x < epsilon && drag_delta_left.y < epsilon
+            ) {
+                if (isMouseInCanvas(io, canvas_p0, canvas_p1)) {
+                    data->samplePoints.push_back(mouse_pos_in_canvas);
+                }
+            }
+            
             // Draw grid + all lines in the canvas
             draw_list->PushClipRect(canvas_p0, canvas_p1, true);
             if (data->opt_enable_grid)
@@ -98,6 +276,32 @@ void CanvasSystem::OnUpdate(Ubpa::UECS::Schedule& schedule) {
             for (int n = 0; n < data->points.size(); n += 2)
                 draw_list->AddLine(ImVec2(origin.x + data->points[n][0], origin.y + data->points[n][1]), ImVec2(origin.x + data->points[n + 1][0], origin.y + data->points[n + 1][1]), IM_COL32(255, 255, 0, 255), 2.0f);
             draw_list->PopClipRect();
+
+
+            // do interpolation
+            if (data->samplePoints.size() > 1) {
+                if (data->opt_polynomial_fitting) {
+                    polynomialFittingInterpolation(draw_list, data->samplePoints, origin);
+                }
+                if (data->opt_gaussian_fitting) {
+                    gaussianFittingInterpolation(draw_list, data->samplePoints, origin, data->sigma);
+                }
+                if (data->opt_polynomial_regression) {
+                    polynomialRegressionInterpolation(draw_list, data->samplePoints, origin, data->span + 1);
+                }
+                if (data->opt_ridge_regression) {
+                    ridgeRegressionInterpolation(draw_list, data->samplePoints, origin, data->span + 1, data->lambda);
+                }
+            }
+
+            // draw sample points
+            for (auto& p : data->samplePoints) {
+                draw_list->AddCircle(ImVec2(origin.x + p[0], origin.y + p[1]), 4.0f, MY_WHITE, 0, 2.5f);
+            }
+
+            ImGui::Text("mouse position in canvas coordinate0: %f", mouse_pos_in_canvas[0]);
+            ImGui::Text("mouse position in canvas coordinate1: %f", mouse_pos_in_canvas[1]);
+            ImGui::Text("#sample points: %d", data->samplePoints.size());
         }
 
         ImGui::End();
