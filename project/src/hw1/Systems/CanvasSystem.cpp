@@ -9,7 +9,6 @@
 #include <cmath>
 #include <tuple>
 
-
 using namespace Ubpa;
 
 inline std::tuple<float, float> getMinMax(std::vector<Ubpa::pointf2>& points) {
@@ -104,13 +103,22 @@ void gaussianFittingInterpolation(ImDrawList *dl, std::vector<Ubpa::pointf2>& po
         x[ind] = p[0];
         ind += 1;
     }
-    y[ind] = (y[ind - 1] + y[ind - 2]) / 2;
+
+    float yMiddlePoint = 0;
+    for (int i = 0; i < n; i += 1) {
+        yMiddlePoint += y[i];
+    }
+    yMiddlePoint /= n;
+    y[ind] = yMiddlePoint;
+    
     for (int i = 0; i < n; i += 1) {
         X.row(i) = getGaussianBaseRow(x, x[i], sigma);
     }
-    X.row(n) = getGaussianBaseRow(x, (x[n - 1] + x[n - 2]) / 2, sigma);
+    Eigen::RowVectorXf lastRow(n + 1);
+    lastRow << 1.0f, Eigen::RowVectorXf::Zero(n);
+    X.row(n) = lastRow;
 
-    Eigen::VectorXf gaussianCoefficients = X.householderQr().solve(y);
+    Eigen::VectorXf gaussianCoefficients = X.colPivHouseholderQr().solve(y);
 
     std::vector<float> xRenderingPoints;
     int renderingSize = getRenderingpointsX(points, xRenderingPoints);
@@ -201,7 +209,7 @@ void CanvasSystem::OnUpdate(Ubpa::UECS::Schedule& schedule) {
             }
 
             if (ImGui::CollapsingHeader("Parameters")) {
-                ImGui::SliderFloat("sigma", &data->sigma, 1.0f, 50.0f);
+                ImGui::SliderFloat("sigma", &data->sigma, 1.0f, 500.0f);
                 ImGui::SliderInt("span", &data->span, 0, 10);
                 ImGui::SliderFloat("lambda", &data->lambda, 0.0f, 1000.0f);
             }
